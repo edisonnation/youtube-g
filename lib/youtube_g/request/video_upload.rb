@@ -126,5 +126,102 @@ class YouTubeG
       end
 
     end
+
+    class ClientLogin
+      def initialize(user, pass, source_client = 'youtube_g')
+        @user, @pass, @source_client = user, pass, source_client
+      end
+
+      def get_auth_token
+        http = Net::HTTP.new("www.google.com", 443)
+        http.use_ssl = true
+        http.verify_mode = OpenSSL::SSL::VERIFY_NONE
+
+        body = [
+          "Email=#{CGI::escape @user}",
+          "Passwd=#{CGI::escape @pass}",
+          "service=youtube",
+          "source=#{CGI::escape @source_client}" ].join('&')
+
+        response = http.post(
+          "/youtube/accounts/ClientLogin", body,
+          "Content-Type" => "application/x-www-form-urlencoded")
+
+        case response.code.to_i
+        when 403 # BadAuthentication
+          raise AuthenticationError, 'Invalid username or password'
+        when 200
+          response.body[/Auth=(.+)/, 1]
+        else
+          # TODO any more errors we need explicit handling for?
+          raise response.body[/Error=(.+)/,1]
+        end
+      end
+    end
+
+    class BrowserBasedUpload
+      def initialize(auth_token, client_id, dev_key)
+        @auth_token, @client_id, @dev_key = auth_token, client_id, dev_key
+      end
+
+      def get_upload_token(opts={})
+        opts.reverse_merge!(
+          :title => '',
+          :description => '',
+          :category => '',
+          :keywords => [])
+
+        upload_request_xml = video_xml(opts)
+
+        upload_header = {
+          "Authorization"  => "GoogleLogin auth=#{@auth_token}",
+          "X-GData-Client" => "#{@client_id}",
+          "X-GData-Key"    => "key=#{@dev_key}",
+          "Content-Type"   => "application/atom+xml; charset=UTF-8",
+          "Content-Length" => "#{upload_request_xml.length}"
+        }
+
+        Net::HTTP.start("gdata.youtube.com") do |upload|
+
+          response = upload.post('/action/GetUploadToken', upload_request_xml, upload_header)
+
+          case response.code.to_i
+          when 403
+            raise AuthenticationError, response.body[/<TITLE>(.+)<\/TITLE>/, 1]
+          when 200
+            xml = REXML::Document.new(response.body)
+            return {
+              :url => xml.elements["//url"].text,
+              :token => xml.elements["//token"].text
+            }
+          else
+            upload_error = ''
+            xml = REXML::Document.new(response.body)
+            errors = xml.elements["//errors"]
+            errors.each do |error|
+              location = error.elements["location"].text[/media:group\/media:(.*)\/text\(\)/,1]
+              code = error.elements["code"].text
+              upload_error << sprintf("%s: %s\r\n", location, code)
+            end
+
+            raise UploadError, upload_error
+          end
+        end
+      end
+
+      private
+        def video_xml(opts)
+          %Q{<?xml version="1.0"?>
+            <entry xmlns="http://www.w3.org/2005/Atom" xmlns:media="http://search.yahoo.com/mrss/" xmlns:yt="http://gdata.youtube.com/schemas/2007">
+              <media:group>
+                <media:title type="plain">#{opts[:title]}</media:title>
+                <media:description type="plain">#{opts[:description]}</media:description>
+                <media:keywords>#{opts[:keywords].join(",")}</media:keywords>
+                <media:category scheme="http://gdata.youtube.com/schemas/2007/categories.cat">#{opts[:category]}</media:category>
+              </media:group>
+            </entry>}
+        end
+
+    end
   end
 end
