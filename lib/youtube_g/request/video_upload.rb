@@ -197,7 +197,9 @@ class YouTubeG
           else
             upload_error = ''
             xml = REXML::Document.new(response.body)
-            errors = xml.elements["//errors"]
+            unless (errors = xml.elements["//errors"])
+              raise response.body
+            end
             errors.each do |error|
               location = error.elements["location"].text[/media:group\/media:(.*)\/text\(\)/,1]
               code = error.elements["code"].text
